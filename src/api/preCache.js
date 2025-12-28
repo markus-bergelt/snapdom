@@ -10,6 +10,7 @@ import { inlineBackgroundImages } from '../modules/background.js'
  * @param {Element|Document} [root=document]
  * @param {Object} [options={}]
  * @param {boolean} [options.embedFonts=true]
+ * @param {number} [options.embedFontWeightThreshold=300]
  * @param {'full'|'soft'|'auto'|'disabled'} [options.cache='full']
  * @param {string}  [options.useProxy=""]
  * @param {{family:string,src:string,weight?:string|number,style?:string,stretchPct?:number}[]} [options.localFonts=[]]
@@ -138,6 +139,7 @@ export async function preCache(root = document, options = {}) {
         exclude: options.excludeFonts,
         localFonts: options.localFonts,
         useProxy: options.useProxy ?? useProxy,
+        embedFontWeightThreshold: options.embedFontWeightThreshold
       })
     } catch {}
   }

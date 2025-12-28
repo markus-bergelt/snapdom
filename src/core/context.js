@@ -28,6 +28,7 @@ export function normalizeCachePolicy(v) {
  * @param {(node: Node)=>boolean} [options.filter]
  * @param {string}  [options.filterMode]
  * @param {boolean} [options.embedFonts]
+ * @param {number} [options.embedFontWeightThreshold]
  * @param {string|string[]} [options.iconFonts]
  * @param {string[]} [options.localFonts]
  * @param {string[]|undefined} [options.excludeFonts]
@@ -69,6 +70,7 @@ export function createContext(options = {}) {
 
     // Fonts
     embedFonts: options.embedFonts ?? false,
+    embedFontWeightThreshold: options.embedFontWeightThreshold ?? 300,
     iconFonts: Array.isArray(options.iconFonts) ? options.iconFonts
       : (options.iconFonts ? [options.iconFonts] : []),
     localFonts: Array.isArray(options.localFonts) ? options.localFonts : [],

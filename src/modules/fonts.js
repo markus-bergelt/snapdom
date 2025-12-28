@@ -571,6 +571,7 @@ async function collectFacesFromSheet(sheet, baseHref, emitFace, ctx) {
  * @param {{families?:string[], domains?:string[], subsets?:string[]}} [options.exclude] // simple exclude
  * @param {Array<{family:string,src:string,weight?:string|number,style?:string,stretchPct?:number}>} [options.localFonts=[]]
  * @param {string}  [options.useProxy=""]
+ * @param {number}  [options.embedFontWeightThreshold=300]
  * @returns {Promise<string>} inlined @font-face CSS
  */
 export async function embedCustomFonts({
@@ -579,6 +580,7 @@ export async function embedCustomFonts({
   exclude = undefined,
   localFonts = [],
   useProxy = '',
+  embedFontWeightThreshold = 300
 } = {}) {
   // ---------- Normalize inputs ----------
   if (!(required instanceof Set)) required = new Set()
@@ -648,7 +650,7 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
     for (const r of need) {
       const sOk = styleOK(normStyle(r.s))
       const tOk = (r.st >= ts.min && r.st <= ts.max)
-      const nearWeight = Math.abs(faceSingleW - r.w) <= 300
+      const nearWeight = Math.abs(faceSingleW - r.w) <= embedFontWeightThreshold
       if (nearWeight && sOk && tOk) return true
     }
   }
@@ -659,7 +661,7 @@ function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
     const hasItalicRequest = need.some((r) => normStyle(r.s) !== 'normal')
     if (hasItalicRequest) {
       for (const r of need) {
-        const nearWeight = Math.abs(faceSingleW - r.w) <= 300
+        const nearWeight = Math.abs(faceSingleW - r.w) <= embedFontWeightThreshold
         const stretchOK = (r.st >= ts.min && r.st <= ts.max)
         if (nearWeight && stretchOK) {
           return true

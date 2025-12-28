@@ -37,6 +37,7 @@ import {
  * @param {Element} element - DOM element to capture
  * @param {Object} [options={}] - Capture options
  * @param {boolean} [options.embedFonts=false] - Whether to embed custom fonts
+ * @param {number} [options.embedFontWeightThreshold=300] - Minimum delta font weight to embed
  * @param {boolean} [options.fast=true] - Whether to skip idle delay for faster results
  * @param {number} [options.scale=1] - Output scale multiplier
  * @param {string[]} [options.exclude] - CSS selectors for elements to exclude
@@ -127,7 +128,8 @@ export async function captureDOM(element, options) {
           usedCodepoints,
           preCached: false,
           exclude: state.options.excludeFonts,
-          useProxy: state.options.useProxy
+          useProxy: state.options.useProxy,
+          embedFontWeightThreshold: options.embedFontWeightThreshold
         })
         resolve()
       }, { fast })

@@ -56,7 +56,7 @@ if (typeof window !== 'undefined') {
   it('converts <img> to dataURL if the image loads', async () => {
     const img = document.createElement('img')
     img.src =
-      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/w8AAn8B9p6Q2wAAAABJRU5ErkJggg=='
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='
     container.appendChild(img)
 
     await inlineImages(container)
@@ -232,5 +232,44 @@ describe('inlineImages – extra coverage', () => {
     const div = wrap.querySelector('div')
     expect(div).toBeTruthy()
     expect((div?.textContent || '')).toBe('img')
+  })
+
+  it('inlines the capture root when it is itself an <img> (bare img capture)', async () => {
+    const img = document.createElement('img')
+    img.src = 'https://ex.com/bare-root.jpg'
+    wrap.appendChild(img)
+
+    vi.mocked(snapFetch).mockResolvedValueOnce({ ok: true, data: 'data:image/jpeg;base64,ROOT' })
+
+    // el propio <img> es la raíz de captura — sin wrapper
+    await inlineImages(img)
+
+    expect(img.src).toBe('data:image/jpeg;base64,ROOT')
+  })
+
+  it('inlines the capture root when it is itself an SVG <image>', async () => {
+    const image = document.createElementNS('http://www.w3.org/2000/svg', 'image')
+    image.setAttribute('href', 'https://ex.com/bare-root-svg.png')
+
+    vi.mocked(snapFetch).mockResolvedValueOnce({ ok: true, data: 'data:image/png;base64,SVGROOT' })
+
+    await inlineImages(image)
+
+    expect(image.getAttribute('href')).toBe('data:image/png;base64,SVGROOT')
+  })
+
+  it('#341: inlines SVG <image href="https://..."> to data URL', async () => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    const img = document.createElementNS('http://www.w3.org/2000/svg', 'image')
+    img.setAttribute('href', 'https://placehold.co/150x100')
+    svg.appendChild(img)
+    wrap.appendChild(svg)
+
+    vi.mocked(snapFetch).mockResolvedValueOnce({ ok: true, data: 'data:image/png;base64,SVGIMG' })
+
+    await inlineImages(wrap)
+
+    const out = wrap.querySelector('image')
+    expect(out?.getAttribute('href')).toBe('data:image/png;base64,SVGIMG')
   })
 })

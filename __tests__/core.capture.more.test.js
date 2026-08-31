@@ -1,4 +1,9 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { isSafari } from '../src/utils/browser.js'
+
+// Safari keeps the natural svg size (export applies width/height later); other engines resize the svg header.
+const sizedW = (w, natural) => `width="${isSafari() ? natural : w}"`
+const sizedH = (h, natural) => `height="${isSafari() ? natural : h}"`
 
 /**
  * Decode the SVG XML text from a data URL returned by captureDOM.
@@ -96,16 +101,16 @@ describe('captureDOM functional', () => {
 
     // width only → el <svg> adopta 200x100; el wrapper interno permanece 100x50 (natural)
     const svg2 = decodeSvg(await captureDOM(el, { fast: true, width: 200, embedFonts: false }))
-    expect(svg2).toContain('width="200"')
-    expect(svg2).toContain('height="100"')
+    expect(svg2).toContain(sizedW(200, 100))
+    expect(svg2).toContain(sizedH(100, 50))
     expect(svg2).toContain('viewBox="0 0 100 50"')
     expect(svg2).toMatch(/<div[^>]*style="[^"]*width:\s*100px/)
     expect(svg2).toMatch(/<div[^>]*style="[^"]*height:\s*50px/)
 
     // height only → el <svg> adopta 200x100; el wrapper permanece 100x50 (natural)
     const svg3 = decodeSvg(await captureDOM(el, { fast: true, height: 100, embedFonts: false }))
-    expect(svg3).toContain('width="200"')
-    expect(svg3).toContain('height="100"')
+    expect(svg3).toContain(sizedW(200, 100))
+    expect(svg3).toContain(sizedH(100, 50))
     expect(svg3).toContain('viewBox="0 0 100 50"')
     expect(svg3).toMatch(/<div[^>]*style="[^"]*width:\s*100px/)
     expect(svg3).toMatch(/<div[^>]*style="[^"]*height:\s*50px/)
@@ -163,8 +168,8 @@ describe('captureDOM – width/height/scale branches (precise)', () => {
     vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 100, 50))
     const el = document.createElement('div')
     const svg = decodeSvg(await captureDOM(el, { fast: true, width: 200, embedFonts: false }))
-    expect(svg).toContain('width="200"')
-    expect(svg).toContain('height="100"')
+    expect(svg).toContain(sizedW(200, 100))
+    expect(svg).toContain(sizedH(100, 50))
     expect(svg).toContain('viewBox="0 0 100 50"')
     expect(svg).toMatch(/<div[^>]*style="[^"]*width:\s*100px/)
     expect(svg).toMatch(/<div[^>]*style="[^"]*height:\s*50px/)
@@ -175,8 +180,8 @@ describe('captureDOM – width/height/scale branches (precise)', () => {
     vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 100, 50))
     const el = document.createElement('div')
     const svg = decodeSvg(await captureDOM(el, { fast: true, height: 100, embedFonts: false }))
-    expect(svg).toContain('width="200"')
-    expect(svg).toContain('height="100"')
+    expect(svg).toContain(sizedW(200, 100))
+    expect(svg).toContain(sizedH(100, 50))
     expect(svg).toContain('viewBox="0 0 100 50"')
     expect(svg).toMatch(/<div[^>]*style="[^"]*width:\s*100px/)
     expect(svg).toMatch(/<div[^>]*style="[^"]*height:\s*50px/)
@@ -209,6 +214,100 @@ describe('captureDOM – viewport path sanity', () => {
     // No imponemos un cálculo exacto; validamos la presencia de x="" y y="" numéricos.
     expect(svg).toMatch(/<foreignObject[^>]*\sx="[-\d]+"/)
     expect(svg).toMatch(/<foreignObject[^>]*\sy="[-\d]+"/)
+  })
+})
+
+//
+// ──────────────────────────────────────────────────────────────────────────────
+// #348: CSS vars excluded from snapshot – fidelity preserved (var() resolved)
+// ──────────────────────────────────────────────────────────────────────────────
+//
+describe('captureDOM – #348 CSS vars fidelity', () => {
+  it('color: var(--x) resolves to computed value in output', async () => {
+    const { captureDOM } = await import('../src/core/capture.js')
+
+    const wrap = document.createElement('div')
+    wrap.innerHTML = `
+      <style>:root { --snapdom-test-color: rgb(255, 0, 0); } .t348 { color: var(--snapdom-test-color); }</style>
+      <div class="t348">red text</div>
+    `
+    document.body.appendChild(wrap)
+    const el = wrap.querySelector('.t348')
+
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 80, 20))
+
+    const url = await captureDOM(el, { fast: true, embedFonts: false })
+    document.body.removeChild(wrap)
+
+    const svg = decodeSvg(url)
+    expect(svg).toMatch(/rgb\(255,\s*0,\s*0\)|#[fF]{2}0000/)
+  })
+})
+
+//
+// ──────────────────────────────────────────────────────────────────────────────
+// #372: iframe CSS isolation – wrapper div must not inherit iframe cascade
+// ──────────────────────────────────────────────────────────────────────────────
+//
+describe('captureDOM – #372 iframe CSS isolation', () => {
+  it('wrapper div has all:initial to block iframe cascade (e.g. div { border: 10px solid red })', async () => {
+    const { captureDOM } = await import('../src/core/capture.js')
+
+    const iframe = document.createElement('iframe')
+    iframe.srcdoc = `
+      <!DOCTYPE html>
+      <html><head><style>div { border: 10px solid red; }</style></head>
+      <body><div>content</div></body></html>
+    `
+    iframe.style.width = '100px'
+    iframe.style.height = '80px'
+    document.body.appendChild(iframe)
+
+    await new Promise((resolve) => { iframe.onload = resolve })
+
+    const doc = iframe.contentDocument
+    const root = doc.documentElement
+    const url = await captureDOM(root, { fast: true, embedFonts: false })
+    document.body.removeChild(iframe)
+
+    const svg = decodeSvg(url)
+    // Wrapper div (container) inside foreignObject must be isolated from iframe CSS (#372).
+    // Browser expands all:initial to individual props (border: initial, position: initial, etc.)
+    expect(svg).toContain('box-sizing: border-box')
+    expect(svg).toMatch(/border:\s*initial|position:\s*initial/)
+  })
+})
+
+//
+// ──────────────────────────────────────────────────────────────────────────────
+// #362: Tailwind * { border: 0 solid } – normalize to border: none in capture
+// ──────────────────────────────────────────────────────────────────────────────
+//
+describe('captureDOM – #362 canvas Tailwind border', () => {
+  it('elements with border-width 0 get border:none in output (not border: 0 solid)', async () => {
+    const { captureDOM } = await import('../src/core/capture.js')
+
+    const wrap = document.createElement('div')
+    wrap.innerHTML = `
+      <style>* { border: 0 solid; }</style>
+      <canvas id="c362" width="80" height="40"></canvas>
+    `
+    document.body.appendChild(wrap)
+    const canvas = wrap.querySelector('#c362')
+    const ctx = canvas.getContext('2d')
+    ctx.fillStyle = 'red'
+    ctx.fillRect(0, 0, 80, 40)
+
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(
+      new DOMRect(0, 0, 80, 40)
+    )
+
+    const url = await captureDOM(wrap, { fast: true, embedFonts: false })
+    document.body.removeChild(wrap)
+
+    const svg = decodeSvg(url)
+    // Canvas becomes img; snapshot should normalize border: 0 solid → border: none
+    expect(svg).toMatch(/\bborder:\s*none\b/)
   })
 })
 
@@ -334,9 +433,9 @@ describe('captureDOM – width & height together apply size (scale or wrapper si
       embedFonts: false,
     }))
 
-    // SVG header adopta el tamaño pedido
-    expect(svg).toContain('width="150"')
-    expect(svg).toContain('height="120"')
+    // SVG header adopta el tamaño pedido (Safari mantiene el natural y escala al exportar)
+    expect(svg).toContain(sizedW(150, 100))
+    expect(svg).toContain(sizedH(120, 50))
 
     // Implementación puede elegir:
     // A) non-uniform scale en container
@@ -515,6 +614,23 @@ describe('captureDOM – pure translate does not trigger strict path', () => {
     if (hasTransform) {
       // No esperaríamos un translate(...) de cancelación (estrict path) en este caso.
       expect(/transform:[^"]*translate\(/.test(svg)).toBe(false)
+    }
+  })
+
+  it('root translation is not double-compensated in the foreignObject offset', async () => {
+    // fixed-centering pattern: left:50% + translateX(-50%). prepareClone strips the root
+    // translation, so the fo bbox must not shift to compensate it (element rendered cut).
+    const el = document.createElement('div')
+    el.style.cssText = 'position:fixed;left:50%;top:16px;transform:translateX(-50%);width:300px;height:40px;background:teal;'
+    document.body.appendChild(el)
+    try {
+      const { captureDOM } = await import('../src/core/capture.js')
+      const svg = decodeSvg(await captureDOM(el, { fast: true, embedFonts: false }))
+      const fo = svg.match(/<foreignObject[^>]* x="(-?[\d.]+)"/)
+      expect(fo).toBeTruthy()
+      expect(Math.abs(parseFloat(fo[1]))).toBeLessThan(1)
+    } finally {
+      el.remove()
     }
   })
 })

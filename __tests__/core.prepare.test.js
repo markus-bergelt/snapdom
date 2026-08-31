@@ -2,8 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { prepareClone } from '../src/core/prepare.js'
 import { cache } from '../src/core/cache.js'
 import { snapFetch } from '../src/modules/snapFetch.js'
-vi.mock('../src/modules/snapFetch.js', async () => {
-  const actual = await vi.importActual('../src/modules/snapFetch.js')
+vi.mock('../src/modules/snapFetch.js', async (importOriginal) => {
+  const actual = await importOriginal()
   return {
     ...actual,
     // queda espiable y con la impl. real por defecto
@@ -13,24 +13,24 @@ vi.mock('../src/modules/snapFetch.js', async () => {
 
 // Wrap ESM exports once so we can override per-test with mockImplementationOnce.
 // By default they call through to the actual implementations.
-vi.mock('../src/modules/svgDefs.js', async () => {
-  const actual = await vi.importActual('../src/modules/svgDefs.js')
+vi.mock('../src/modules/svgDefs.js', async (importOriginal) => {
+  const actual = await importOriginal()
   return {
     ...actual,
     inlineExternalDefsAndSymbols: vi.fn(actual.inlineExternalDefsAndSymbols),
   }
 })
 
-vi.mock('../src/modules/pseudo.js', async () => {
-  const actual = await vi.importActual('../src/modules/pseudo.js')
+vi.mock('../src/modules/pseudo.js', async (importOriginal) => {
+  const actual = await importOriginal()
   return {
     ...actual,
     inlinePseudoElements: vi.fn(actual.inlinePseudoElements),
   }
 })
 
-vi.mock('../src/utils/index.js', async () => {
-  const actual = await vi.importActual('../src/utils/index.js')
+vi.mock('../src/utils/index.js', async (importOriginal) => {
+  const actual = await importOriginal()
   return {
     ...actual,
     stripTranslate: vi.fn(actual.stripTranslate),
@@ -39,8 +39,8 @@ vi.mock('../src/utils/index.js', async () => {
 })
 
 // (Optional) allow deepClone error branch without permanent stubbing
-vi.mock('../src/core/clone.js', async () => {
-  const actual = await vi.importActual('../src/core/clone.js')
+vi.mock('../src/core/clone.js', async (importOriginal) => {
+  const actual = await importOriginal()
   return {
     ...actual,
     deepClone: vi.fn(actual.deepClone),
@@ -83,7 +83,7 @@ describe('prepareClone deep coverage (Browser Mode)', () => {
     await expect(prepareClone(null)).rejects.toThrow()
   })
 
-  it('applies stabilizeLayout when outline is visible and no border present', async () => {
+  it('applies stabilizeLayout when outline is visible and no border present, then restores it', async () => {
   const el = document.createElement('div')
   el.style.outline = '2px solid red'
   vi.spyOn(window, 'getComputedStyle').mockImplementation(() => ({
@@ -94,7 +94,8 @@ describe('prepareClone deep coverage (Browser Mode)', () => {
     getPropertyValue: () => '', // requerido por inlineAllStyles
   }))
   await prepareClone(el)
-  expect(el.style.border).toContain('transparent') // se setea en stabilizeLayout
+  // #stabilizeLayout is a transient measurement aid, not a permanent mutation of the caller's DOM
+  expect(el.style.border).toBe('')
   window.getComputedStyle.mockRestore()
 })
 
@@ -104,6 +105,38 @@ describe('prepareClone deep coverage (Browser Mode)', () => {
       throw new Error('fail')
     })
     await expect(prepareClone(el)).resolves.toBeTruthy()
+  })
+
+  it('inlines external SVG defs into the clone without mutating the source DOM', async () => {
+    const SVG_NS = 'http://www.w3.org/2000/svg'
+    // External symbol living elsewhere in the document.
+    const gsvg = document.createElementNS(SVG_NS, 'svg')
+    const sym = document.createElementNS(SVG_NS, 'symbol')
+    sym.setAttribute('id', 'ext-star')
+    sym.appendChild(document.createElementNS(SVG_NS, 'path'))
+    gsvg.appendChild(sym)
+    document.body.appendChild(gsvg)
+
+    // Source references the external symbol via <use>.
+    const src = document.createElement('div')
+    const svg = document.createElementNS(SVG_NS, 'svg')
+    const use = document.createElementNS(SVG_NS, 'use')
+    use.setAttribute('href', '#ext-star')
+    svg.appendChild(use)
+    src.appendChild(svg)
+    document.body.appendChild(src)
+
+    const { clone } = await prepareClone(src)
+
+    // Live source must be left untouched (non-destructive capture).
+    expect(src.querySelector('svg.inline-defs-container')).toBeNull()
+    // The clone carries the inlined defs so the serialized SVG resolves the <use>.
+    const container = clone.querySelector('svg.inline-defs-container')
+    expect(container).toBeTruthy()
+    expect(container.querySelector('symbol#ext-star')).toBeTruthy()
+
+    src.remove()
+    gsvg.remove()
   })
 
   it('handles error in inlinePseudoElements (logs and continues)', async () => {
@@ -266,9 +299,10 @@ describe('prepareClone deep coverage (Browser Mode)', () => {
     globalThis.fetch = originalFetch
   })
 
-  it('converts "poster" attribute when it starts with blob:', async () => {
+  it('converts <video> to <img> with a data URL (frame capture or poster fallback)', async () => {
   const wrap = document.createElement('div')
   const el = document.createElement('video')
+  // blob: poster — used as fallback when no frame is available and canvas is blank
   el.setAttribute('poster', 'blob:123')
   wrap.appendChild(el)
 
@@ -279,8 +313,12 @@ describe('prepareClone deep coverage (Browser Mode)', () => {
   })
 
   const { clone } = await prepareClone(wrap)
-  const outPoster = clone.querySelector('video')?.getAttribute('poster') || ''
-  expect(outPoster).toMatch(/^data:/)
+  // deepClone now replaces <video> with <img> to avoid canvas tainting
+  const img = clone.querySelector('img')
+  expect(img).toBeTruthy()
+  // The img src should be a data URL (either blank frame or resolved poster)
+  const src = img?.getAttribute('src') || ''
+  expect(src).toMatch(/^data:/)
 
   globalThis.fetch = originalFetch
 })
@@ -444,6 +482,20 @@ it('root transform becomes empty string when stripTranslate returns falsy', asyn
   csMock.mockRestore()
 })
 
+// Bug-hunt finding: resolveBlobUrlsInTree built every worklist via root.querySelectorAll(...),
+// which never matches root itself — a capture root that IS the blob: <img> was skipped by this
+// early pass, only picked up later by inlineImages, losing a race if the caller revokes the
+// object URL synchronously right after calling snapdom.
+it('resolves a blob: src when the capture root itself is the <img>', async () => {
+  const img = document.createElement('img')
+  img.src = 'blob:http://localhost/root-img'
+
+  vi.mocked(snapFetch).mockResolvedValueOnce({ ok: true, data: 'data:image/png;base64,ROOT' })
+
+  const { clone } = await prepareClone(img)
+  expect(clone.getAttribute('src')).toBe('data:image/png;base64,ROOT')
+})
+
 // 8) resolveBlobUrlsInTree early paths: img sin src/srcset, style sin blob
 it('skips nodes with no actionable URLs (early paths)', async () => {
   const root = document.createElement('div')
@@ -461,46 +513,77 @@ it('skips nodes with no actionable URLs (early paths)', async () => {
   expect(outImg?.hasAttribute('src')).toBe(false)
   expect(outStyle).toContain('color:red')
 })
-it('replaces blob: URLs inside <img srcset> and preserves non-blob candidates/descriptor', async () => {
-  const wrap = document.createElement('div')
-  const img = document.createElement('img')
-  img.setAttribute('srcset', 'blob:aa 1x, https://x/y.png 2x, blob:bb 3x')
-  wrap.appendChild(img)
+// srcset selection mirrors the browser's own: smallest density >= devicePixelRatio.
+// These cases assert WHICH candidate is frozen, so they only hold at a known DPR —
+// on a Retina runner the real value is 2 and the 2x candidate wins. Pin it instead of
+// inheriting the display, and reset the snapFetch queue per test: these live outside
+// the describe above, so its clearAllMocks does not reach them and an unconsumed
+// mockResolvedValueOnce leaks into the next case.
+describe('srcset freezing (DPR-pinned)', () => {
+  let dprSpy
+  beforeEach(() => {
+    vi.mocked(snapFetch).mockReset()
+    dprSpy = vi.spyOn(window, 'devicePixelRatio', 'get').mockReturnValue(1)
+  })
+  afterEach(() => {
+    dprSpy?.mockRestore()
+    vi.mocked(snapFetch).mockReset()
+  })
 
-  // ⬇️ Evitar que freezeImgSrcset borre srcset
-  Object.defineProperty(img, 'currentSrc', { configurable: true, get: () => '' })
-  Object.defineProperty(img, 'src',        { configurable: true, get: () => '' })
+  it('freezes a srcset-only img to one candidate and resolves a chosen blob: URL', async () => {
+    const wrap = document.createElement('div')
+    const img = document.createElement('img')
+    img.setAttribute('srcset', 'blob:aa 1x, https://x/y.png 2x, blob:bb 3x')
+    wrap.appendChild(img)
 
-  vi.mocked(snapFetch)
-    .mockResolvedValueOnce({ ok: true, data: 'data:image/png;base64,AAA' }) // blob:aa
-    .mockResolvedValueOnce({ ok: true, data: 'data:image/png;base64,BBB' }) // blob:bb
+    // currentSrc/src vacíos: la selección debe salir del srcset (no queda img sin fuente)
+    Object.defineProperty(img, 'currentSrc', { configurable: true, get: () => '' })
+    Object.defineProperty(img, 'src', { configurable: true, get: () => '' })
 
-  const { clone } = await prepareClone(wrap)
-  const out = clone.querySelector('img')?.getAttribute('srcset') || ''
+    vi.mocked(snapFetch)
+      .mockResolvedValueOnce({ ok: true, data: 'data:image/png;base64,AAA' }) // blob del candidato elegido
 
-  expect(out.includes('blob:')).toBe(false)
-  expect(out).toContain('data:image/png;base64,AAA 1x')
-  expect(out).toContain('https://x/y.png 2x')
-  expect(out).toContain('data:image/png;base64,BBB 3x')
-})
+    const { clone } = await prepareClone(wrap)
+    const out = clone.querySelector('img')
 
-it('keeps original srcset when blob→data conversion fails (changed=false)', async () => {
-  const wrap = document.createElement('div')
-  const img = document.createElement('img')
-  img.setAttribute('srcset', 'blob:fail 1x, blob:alsofail 2x')
-  wrap.appendChild(img)
+    // freezeImgSrcset elige un candidato (1x en DPR 1), lo fija como src y quita srcset;
+    // resolveBlobUrlsInTree convierte ese blob: elegido a data:.
+    expect(out?.hasAttribute('srcset')).toBe(false)
+    expect(out?.getAttribute('src')).toBe('data:image/png;base64,AAA')
+  })
 
-  // ⬇️ Evitar que freezeImgSrcset borre srcset
-  Object.defineProperty(img, 'currentSrc', { configurable: true, get: () => '' })
-  Object.defineProperty(img, 'src',        { configurable: true, get: () => '' })
+  it('keeps the chosen blob: src when blob→data conversion fails (changed=false)', async () => {
+    const wrap = document.createElement('div')
+    const img = document.createElement('img')
+    img.setAttribute('srcset', 'blob:fail 1x, blob:alsofail 2x')
+    wrap.appendChild(img)
 
-  vi.mocked(snapFetch)
-    .mockResolvedValueOnce({ ok: false, data: null })
-    .mockResolvedValueOnce({ ok: false, data: null })
+    Object.defineProperty(img, 'currentSrc', { configurable: true, get: () => '' })
+    Object.defineProperty(img, 'src', { configurable: true, get: () => '' })
 
-  const { clone } = await prepareClone(wrap)
-  const out = clone.querySelector('img')?.getAttribute('srcset') || ''
+    vi.mocked(snapFetch)
+      .mockResolvedValueOnce({ ok: false, data: null })
 
-  // Como todas fallaron, changed=false → no se toca el atributo
-  expect(out).toBe('blob:fail 1x, blob:alsofail 2x')
+    const { clone } = await prepareClone(wrap)
+    const out = clone.querySelector('img')
+
+    // Falló la conversión: el src elegido queda como estaba (blob:) y sin srcset
+    expect(out?.hasAttribute('srcset')).toBe(false)
+    expect(out?.getAttribute('src')).toBe('blob:fail')
+  })
+
+  it('follows devicePixelRatio when choosing the frozen candidate', async () => {
+    // Same srcset, DPR 2: the 2x candidate must win. Locks the DPR dependency in place
+    // so the pinning above reads as deliberate rather than as a magic constant.
+    dprSpy.mockReturnValue(2)
+    const wrap = document.createElement('div')
+    const img = document.createElement('img')
+    img.setAttribute('srcset', 'https://x/one.png 1x, https://x/two.png 2x')
+    wrap.appendChild(img)
+    Object.defineProperty(img, 'currentSrc', { configurable: true, get: () => '' })
+    Object.defineProperty(img, 'src', { configurable: true, get: () => '' })
+
+    const { clone } = await prepareClone(wrap)
+    expect(clone.querySelector('img')?.getAttribute('src')).toBe('https://x/two.png')
+  })
 })

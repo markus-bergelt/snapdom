@@ -1,0 +1,44 @@
+{
+  "name": "@zumer/snapdom-plugins",
+  "version": "2.2.1",
+  "description": "Official plugins for SnapDOM",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./timestamp-overlay": "./timestamp-overlay.js",
+    "./ascii-export": "./ascii-export.js",
+    "./replace-text": "./replace-text.js",
+    "./filter": "./filter.js",
+    "./color-tint": "./color-tint.js",
+    "./html-in-canvas": "./html-in-canvas.js",
+    "./pdf-image": "./pdf-image.js",
+    "./agent-map": "./agent-map.js",
+    "./html-export": "./html-export.js",
+    "./gif-export": "./gif-export.js",
+    "./video-export": "./video-export.js"
+  },
+  "files": [
+    "*.js",
+    "README.md"
+  ],
+  "keywords": [
+    "snapdom",
+    "snapdom-plugin",
+    "dom-capture",
+    "plugins"
+  ],
+  "author": "Juan Martin Muda",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zumerlab/snapdom.git",
+    "directory": "packages/plugins"
+  },
+  "bugs": {
+    "url": "https://github.com/zumerlab/snapdom/issues"
+  },
+  "homepage": "https://snapdom.dev/",
+  "peerDependencies": {
+    "@zumer/snapdom": ">=2.12.1"
+  }
+}

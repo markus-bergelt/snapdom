@@ -3,7 +3,10 @@ import { captureDOM } from '../core/capture.js'
 import { extendIconFonts } from '../modules/iconFonts.js'
 import { createContext } from '../core/context.js'
 import { isSafari } from '../utils/browser.js'
+import { debugWarn } from '../utils/debug.js'
 import { registerPlugins, runHook, runAll, attachSessionPlugins } from '../core/plugins.js'
+import { collectUsedFontVariants, ensureFontsReady } from '../modules/fonts.js'
+import { captureWithBurst } from '../core/burst.js'
 export { preCache } from './preCache.js'
 
 // API pública (registro global de plugins)
@@ -14,8 +17,6 @@ export const snapdom = Object.assign(main, { plugins })
 const INTERNAL_TOKEN = Symbol('snapdom.internal')
 // Token interno para llamadas de export "silenciosas" desde plugins (no hooks)
 const INTERNAL_EXPORT_TOKEN = Symbol('snapdom.internal.silent')
-
-let _safariWarmup = false
 
 /**
  * Main function that captures a DOM element and returns export utilities.
@@ -44,14 +45,28 @@ async function main(element, userOptions) {
   // Attach per-capture plugins (local-first) without removing globals
   attachSessionPlugins(context, userOptions && userOptions.plugins)
 
-  // Safari warm-up: only when needed (fonts embedded OR backgrounds/masks present)
-  if (isSafari() && (context.embedFonts === true || hasBackgroundOrMask(element))) {
-    for (let i = 0; i < 3; i++) {
+  // Safari pre-step (replaces the old 3x pre-capture warmup — WebKit #219770's blank
+  // first draw is now handled at draw time by toCanvas's verified-draw ladder):
+  // wait for the fonts the element actually uses, and poke GPU-backed <canvas>
+  // stores so cloneCanvas's toDataURL isn't blank. Both are cheap per capture.
+  if (isSafari()) {
+    if (context.embedFonts === true) {
       try {
-        await safariWarmup(element, userOptions)
-        _safariWarmup = false
-      } catch {
-        // swallow error
+        const required = collectUsedFontVariants(element)
+        const families = new Set([...required].map(k => String(k).split('__')[0]).filter(Boolean))
+        await ensureFontsReady(families, 1)
+      } catch { /* non-blocking */ }
+    }
+    // querySelectorAll never matches element itself — a capture root that IS the <canvas>
+    // (e.g. snapdom(canvasEl) for a single chart) must be poked too.
+    const canvases = Array.from(element.querySelectorAll('canvas'))
+    if (element.tagName === 'CANVAS') canvases.unshift(element)
+    for (const c of canvases) {
+      try {
+        const ctx = c.getContext('2d', { willReadFrequently: true })
+        if (ctx) ctx.getImageData(0, 0, 1, 1)
+      } catch (e) {
+        debugWarn(userOptions, 'safari canvas poke failed', e)
       }
     }
   }
@@ -66,6 +81,9 @@ async function main(element, userOptions) {
     }
   }
 
+  if (context.burst) {
+    return captureWithBurst(element, userOptions, context, () => snapdom.capture(element, context, INTERNAL_TOKEN))
+  }
   return snapdom.capture(element, context, INTERNAL_TOKEN)
 }
 
@@ -80,6 +98,12 @@ async function main(element, userOptions) {
  */
 snapdom.capture = async (el, context, _token) => {
   if (_token !== INTERNAL_TOKEN) throw new Error('[snapdom.capture] is internal. Use snapdom(...) instead.')
+
+  // Export/defineExports contexts are the same capture context promised to every
+  // other hook. Keep the source element available there too (not only in
+  // captureDOM's transient state wrapper), which is required for ownerDocument
+  // URL/language semantics in document exporters.
+  context.element = el
 
   const url = await captureDOM(el, context)
 
@@ -122,48 +146,22 @@ snapdom.capture = async (el, context, _token) => {
 
   // ——— 2) Exports declarados por plugins ———
   // Fachada reutilizable “silenciosa” (sin hooks) para uso en defineExports()
-  const _pluginExports = {
-    svg:   async (opts) => {
-      const { toSvg } = await import('../exporters/toImg.js')
-      return toSvg(url, { ...context, ...(opts || {}), [INTERNAL_EXPORT_TOKEN]: true })
-    },
-    canvas:async (opts) => {
-      const { toCanvas } = await import('../exporters/toCanvas.js')
-      return toCanvas(url, { ...context, ...(opts || {}), [INTERNAL_EXPORT_TOKEN]: true })
-    },
-    png:   async (opts) => {
-      const { rasterize } = await import('../modules/rasterize.js')
-      return rasterize(url, { ...context, ...(opts || {}), format: 'png', [INTERNAL_EXPORT_TOKEN]: true })
-    },
-    jpeg:  async (opts) => {
-      const { rasterize } = await import('../modules/rasterize.js')
-      return rasterize(url, { ...context, ...(opts || {}), format: 'jpeg', [INTERNAL_EXPORT_TOKEN]: true })
-    },
-    jpg:   async (opts) => {
-      const { rasterize } = await import('../modules/rasterize.js')
-      return rasterize(url, { ...context, ...(opts || {}), format: 'jpeg', [INTERNAL_EXPORT_TOKEN]: true })
-    },
-    webp:  async (opts) => {
-      const { rasterize } = await import('../modules/rasterize.js')
-      return rasterize(url, { ...context, ...(opts || {}), format: 'webp', [INTERNAL_EXPORT_TOKEN]: true })
-    },
-    blob:  async (opts) => {
-      const { toBlob } = await import('../exporters/toBlob.js')
-      return toBlob(url, { ...context, ...(opts || {}), [INTERNAL_EXPORT_TOKEN]: true })
-    },
-    img:   async (opts) => {
-      const { toImg } = await import('../exporters/toImg.js')
-      return toImg(url, { ...context, ...(opts || {}), [INTERNAL_EXPORT_TOKEN]: true })
-    },
+  const _pluginExports = {}
+  for (const k of ['img', 'svg', 'canvas', 'blob', 'png', 'jpeg', 'webp']) {
+    _pluginExports[k] = async (opts) =>
+      coreExports[k](context, { ...(opts || {}), [INTERNAL_EXPORT_TOKEN]: true })
   }
+  _pluginExports.jpg = _pluginExports.jpeg
 
   // Contexto extendido para defineExports (incluye URL y la fachada para reuso)
   const _defineCtx = { ...context, export: { url }, exports: _pluginExports }
 
   const providedMaps = await runAll('defineExports', _defineCtx)
-  const provided = Object.assign({}, ...providedMaps.filter(x => x && typeof x === 'object'))
+  // Local-first: earlier plugins in the list (locals) win over later (globals).
+  // Object.assign applies last-wins, so reverse before merging.
+  const provided = Object.assign({}, ...providedMaps.filter(x => x && typeof x === 'object').reverse())
 
-  // Merge (plugins pueden overridear core)
+  // Plugin exports override core (plugin > core by name).
   const exportsMap = { ...coreExports, ...provided }
 
   // —— Alias: jpg → jpeg (para toJpg y to('jpg')) ——
@@ -171,10 +169,18 @@ snapdom.capture = async (el, context, _token) => {
     exportsMap.jpg = (ctx, opts) => exportsMap.jpeg(ctx, opts)
   }
 
-  // —— Normalizador para opciones por tipo (p.ej. JPEG: fondo blanco) ——
+  // —— Normalizador para opciones por tipo (p.ej. JPEG/WebP: fondo blanco) ——
   function normalizeExportOptions(type, opts) {
     const next = { ...context, ...(opts || {}) }
-    if (type === 'jpeg' || type === 'jpg') {
+    // `type` aquí es el NOMBRE del export ('blob'/'canvas'/'download'/'jpeg'/…), no el formato
+    // de imagen: en toBlob/toCanvas/download el formato viaja en opts.format/opts.type. Resolver
+    // el formato real (jpg→jpeg) para aplanar el fondo igual que createContext (context.js:84),
+    // o JPEG codificaría las zonas transparentes en negro.
+    const lossy = (s) => s === 'jpeg' || s === 'jpg' || s === 'webp'
+    const fmt = [type, next.format, next.type]
+      .map(v => (typeof v === 'string' ? v.toLowerCase() : ''))
+      .find(lossy)
+    if (fmt) {
       const noBg = next.backgroundColor == null || next.backgroundColor === 'transparent'
       if (noBg) next.backgroundColor = '#ffffff'
     }
@@ -185,21 +191,38 @@ snapdom.capture = async (el, context, _token) => {
   let afterSnapFired = false
   let _exportQueue = Promise.resolve()
   async function runExport(type, opts) {
+    // Snapshot at CALL time, not when this export eventually reaches the session
+    // queue. Callers commonly reuse an options object; a slow earlier export must
+    // not let later mutation rewrite the meaning of an already-requested export.
+    const requestedOptions = Object.freeze(
+      opts && typeof opts === 'object' ? { ...opts } : {}
+    )
     const job = async () => {
       const work = exportsMap[type]
       if (!work) throw new Error(`[snapdom] Unknown export type: ${type}`)
-      const nextOpts = normalizeExportOptions(type, opts)
-      const ctx = { ...context, export: { type, options: nextOpts, url } }
-      await runHook('beforeExport', ctx)
+      // Preserve key presence as well as values. A plugin default and a normalized
+      // capture default may legitimately have the same value; comparing merged
+      // values cannot tell whether the caller explicitly overrode the plugin.
+      const nextOpts = normalizeExportOptions(type, requestedOptions)
+      const ctx = { ...context, export: { type, options: nextOpts, requestedOptions, url } }
+      // Payload shape per the plugin spec: beforeExport(ctx, {format, options}),
+      // afterExport(ctx, {format, options, result}). `type` is the export name (png/blob/…).
+      await runHook('beforeExport', ctx, { format: type, options: nextOpts })
       const result2 = await work(ctx, nextOpts)
-      await runHook('afterExport', ctx, result2)
+      await runHook('afterExport', ctx, { format: type, options: nextOpts, result: result2 })
       if (!afterSnapFired) {
         afterSnapFired = true
         await runHook('afterSnap', context)
       }
       return result2
     }
-    return _exportQueue = _exportQueue.then(job)
+    // A rejected job must reject only for ITS OWN caller, not poison every export
+    // call made afterward: chaining `_exportQueue.then(job)` directly would leave
+    // _exportQueue permanently rejected once any export throws, and `.then()`
+    // with no rejection handler skips `job` entirely on every later call.
+    const run = _exportQueue.then(job)
+    _exportQueue = run.catch(() => {})
+    return run
   }
 
   // —— Helpers esperados por los tests + API azúcar ——
@@ -218,6 +241,11 @@ snapdom.capture = async (el, context, _token) => {
     toWebp: (opts) => runExport('webp', opts),
     download: (opts) => runExport('download', opts)
   }
+  // Read-only render geometry for document exporters and diagnostics. Pin both
+  // the frozen value and the result property so URL/meta cannot diverge later.
+  Object.defineProperty(result, 'meta', {
+    value: context.meta, enumerable: true, writable: false, configurable: false,
+  })
 
   // Azúcar dinámico por cada export registrado (plugins incluidos)
   for (const key of Object.keys(exportsMap)) {
@@ -296,78 +324,5 @@ snapdom.toWebp = (el, options) => snapdom(el, { ...options, format: 'webp' }).th
  * @returns {Promise<void>}
  */
 snapdom.download = (el, options) => snapdom(el, options).then(result => result.download())
-
-/**
- * Force Safari to decode fonts and images by doing an offscreen pre-capture.
- */
-async function safariWarmup(element, baseOptions) {
-  if (_safariWarmup) return
-
-  const preflight = {
-    ...baseOptions,
-    fast: true,
-    embedFonts: true,
-    scale: 0.2
-  }
-
-  let url
-  try {
-    url = await captureDOM(element, preflight)
-  } catch {}
-
-  // 1) estabiliza layout/paint en WebKit
-  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
-
-  if (url) {
-    await new Promise((resolve) => {
-      const img = new Image()
-      try { img.decoding = 'sync'; img.loading = 'eager' } catch {}
-      img.style.cssText =
-        'position:fixed;left:0px;top:0px;width:10px;height:10px;opacity:0.01;pointer-events:none;'
-      img.src = url
-      document.body.appendChild(img)
-
-      ;(async () => {
-        try { if (typeof img.decode === 'function') await img.decode() } catch {}
-        const start = performance.now()
-        while (!(img.complete && img.naturalWidth > 0) && performance.now() - start < 900) {
-          await new Promise(r => setTimeout(r, 200))
-        }
-        await new Promise(r => requestAnimationFrame(r))
-        try { img.remove() } catch {}
-        resolve()
-      })()
-    })
-  }
-
-  // 3) “poke” a los canvas del elemento (Chart.js, etc.)
-  element.querySelectorAll('canvas').forEach(c => {
-    try {
-      const ctx = c.getContext('2d', { willReadFrequently: true })
-      if (ctx) { ctx.getImageData(0, 0, 1, 1) }
-    } catch {}
-  })
-
-  _safariWarmup = true
-}
-
-/**
- * Checks if the element (or its descendants) use background or mask images.
- */
-function hasBackgroundOrMask(el) {
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT)
-  while (walker.nextNode()) {
-    const node = /** @type {Element} */ (walker.currentNode)
-    const cs = getComputedStyle(node)
-
-    const bg = cs.backgroundImage && cs.backgroundImage !== 'none'
-    const mask = (cs.maskImage && cs.maskImage !== 'none') ||
-      (cs.webkitMaskImage && cs.webkitMaskImage !== 'none')
-
-    if (bg || mask) return true
-    if (node.tagName === 'CANVAS') return true
-  }
-  return false
-}
 
 export default snapdom

@@ -135,9 +135,21 @@ dist
 .yarn/install-state.gz
 .pnp.*
 
-package-lock.json
-
 drafts/
 
-__tests__/__screenshots__
+demos/
 
+__tests__/__screenshots__
+__snapshots__
+
+.vscode/
+.claude/
+.cursor/
+bench/
+AGENTS.md
+.snapeye/
+packages/agent
+.playwright-cli
+
+# snapdom Pro product pages — generated/authored in snapdom-pro, not published yet
+docs/pro/

@@ -1,9 +1,19 @@
 /**
- * Utilities for inlining <img> elements as data URLs or placeholders.
+ * Utilities for inlining <img> and SVG <image> elements as data URLs or placeholders.
+ * Fixes #341: SVG <image href="https://..."> now inlined like HTML <img>.
  * @module images
  */
 
 import { snapFetch } from './snapFetch.js'
+import { cache } from '../core/cache.js'
+import { pickSrcsetCandidate } from './pictureResolver.js'
+
+const XLINK_NS = 'http://www.w3.org/1999/xlink'
+
+function getSvgImageHref(el) {
+  return el.getAttribute('href') || el.getAttribute('xlink:href') ||
+    (typeof el.getAttributeNS === 'function' ? el.getAttributeNS(XLINK_NS, 'href') : null)
+}
 
 /**
  * Extract dimensions from an image element in priority order
@@ -36,12 +46,17 @@ function extractImageDimensions(img) {
  * @returns {Promise<void>}
  */
 export async function inlineImages(clone, options = {}) {
+  // querySelectorAll only matches descendants: when the capture root is itself an
+  // <img>, it must be included or its src stays external and svg-as-image won't load it.
   const imgs = Array.from(clone.querySelectorAll('img'))
+  if (clone.tagName === 'IMG') imgs.unshift(clone)
   /** @param {HTMLImageElement} img */
   const processImg = async (img) => {
-    // Normalize src/srcset/sizes to a single concrete URL
+    // Normalize src/srcset/sizes to a single concrete URL. currentSrc stays empty on the
+    // detached clone until the candidate loads (Chromium/Firefox), so derive a candidate
+    // from srcset before stripping it — never demote a sourced img to a source-less one.
     if (!img.getAttribute('src')) {
-      const eff = img.currentSrc || img.src || ''
+      const eff = img.currentSrc || img.src || pickSrcsetCandidate(img.getAttribute('srcset'), img) || ''
       if (eff) img.setAttribute('src', eff)
     }
 
@@ -51,9 +66,21 @@ export async function inlineImages(clone, options = {}) {
     const src = img.src || ''
     if (!src) return
 
+    // Reuse a dataURL prefetched by preCache (keyed by the same resolved src) so the capture
+    // path doesn't re-fetch it. snapFetch doesn't cache successes, so without this the prefetch
+    // bought nothing.
+    const cached = cache.image?.get(src)
+    if (cached) {
+      img.src = cached
+      if (!img.width) img.width = img.naturalWidth || 100
+      if (!img.height) img.height = img.naturalHeight || 100
+      return
+    }
+
     const r = await snapFetch(src, { as: 'dataURL', useProxy: options.useProxy })
     if (r.ok && typeof r.data === 'string' && r.data.startsWith('data:')) {
       // Success path: inline DataURL and ensure dimensions for layout fidelity
+      cache.image?.set(src, r.data)
       img.src = r.data
       if (!img.width) img.width = img.naturalWidth || 100
       if (!img.height) img.height = img.naturalHeight || 100
@@ -71,12 +98,12 @@ export async function inlineImages(clone, options = {}) {
 
         if (fallbackUrl) {
           const fallbackData = await snapFetch(fallbackUrl, { as: 'dataURL', useProxy: options.useProxy })
-          img.src = fallbackData.data
-
-          // Mantener tu comportamiento actual:
-          if (!img.width) img.width = fbW
-          if (!img.height) img.height = fbH
-          return
+          if (fallbackData?.ok && typeof fallbackData.data === 'string') {
+            img.src = fallbackData.data
+            if (!img.width) img.width = fbW
+            if (!img.height) img.height = fbH
+            return
+          }
         }
       } catch {
         // noop → cae al placeholder
@@ -105,8 +132,31 @@ export async function inlineImages(clone, options = {}) {
     }
   }
 
-  for (let i = 0; i < imgs.length; i += 4) {
-    const group = imgs.slice(i, i + 4).map(processImg)
+  // Batch size 6 matches the typical per-origin HTTP/1.1 connection limit;
+  // raising it further doesn't help once the connection pool is saturated
+  // and could degrade other in-flight requests on the page.
+  const BATCH = 6
+  for (let i = 0; i < imgs.length; i += BATCH) {
+    const group = imgs.slice(i, i + BATCH).map(processImg)
+    await Promise.allSettled(group)
+  }
+
+  // #341: Inline SVG <image href="https://..."> (e.g. Highcharts, D3)
+  const svgImages = Array.from(clone.querySelectorAll('image'))
+  if (clone.localName === 'image') svgImages.unshift(clone)
+  const processSvgImage = async (el) => {
+    const href = getSvgImageHref(el)
+    if (!href || href.startsWith('data:') || href.startsWith('blob:')) return
+
+    const r = await snapFetch(href, { as: 'dataURL', useProxy: options.useProxy })
+    if (r.ok && typeof r.data === 'string' && r.data.startsWith('data:')) {
+      el.setAttribute('href', r.data)
+      el.removeAttribute('xlink:href')
+      if (typeof el.removeAttributeNS === 'function') el.removeAttributeNS(XLINK_NS, 'href')
+    }
+  }
+  for (let i = 0; i < svgImages.length; i += BATCH) {
+    const group = svgImages.slice(i, i + BATCH).map(processSvgImage)
     await Promise.allSettled(group)
   }
 }

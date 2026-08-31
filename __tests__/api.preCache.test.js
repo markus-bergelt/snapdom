@@ -50,8 +50,9 @@ describe('preCache – extra coverage', () => {
   // (2) Con proxy activo, NO hay intentos directos en el nuevo snapFetch
   expect(directCalls.length).toBe(0)
 
-  // (3) Dedupe en cache.background: una sola entrada para ese URL
-  const key = safeEncodeURI(DIRECT)
+  // (3) Dedupe en cache.background: una sola entrada para ese URL.
+  // La clave incluye el proxy (evita que un fallo sin-proxy envenene otra config).
+  const key = PROXY + '|' + safeEncodeURI(DIRECT)
   expect(cache.background.has(key)).toBe(true)
   expect([...cache.background.keys()].filter(k => k === key).length).toBe(1)
 
@@ -78,7 +79,8 @@ describe('preCache – extra coverage', () => {
     await preCache(el)
 
     // Verificamos que SOLO la capa url(...) fue procesada y quedó cacheada
-    const key = safeEncodeURI(URL)
+    // (clave con prefijo de proxy vacío, sin useProxy)
+    const key = '|' + safeEncodeURI(URL)
     expect(cache.background.has(key)).toBe(true)
 
     // No exigimos conteo de fetch: puede ser 0 si fuese raster.
@@ -86,6 +88,51 @@ describe('preCache – extra coverage', () => {
     // expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 
     document.body.removeChild(el)
+  })
+
+  it('prefetches <img src> into cache.image as a dataURL', async () => {
+    const PNG = 'https://cdn.example.com/photo.png'
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'image/png' },
+      blob: () => Promise.resolve(new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' })),
+    })
+
+    const root = document.createElement('div')
+    const img = document.createElement('img')
+    img.src = PNG
+    root.appendChild(img)
+    document.body.appendChild(root)
+
+    await preCache(root, { embedFonts: false })
+
+    const resolved = img.currentSrc || img.src
+    expect(cache.image.has(resolved)).toBe(true)
+    expect(cache.image.get(resolved)).toMatch(/^data:/)
+
+    document.body.removeChild(root)
+  })
+
+  it('captures the root itself when it is an <img>', async () => {
+    const PNG = 'https://cdn.example.com/root.png'
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'image/png' },
+      blob: () => Promise.resolve(new Blob([new Uint8Array([137, 80, 78, 71])], { type: 'image/png' })),
+    })
+
+    const img = document.createElement('img')
+    img.src = PNG
+    document.body.appendChild(img)
+
+    await preCache(img, { embedFonts: false })
+
+    const resolved = img.currentSrc || img.src
+    expect(cache.image.has(resolved)).toBe(true)
+
+    document.body.removeChild(img)
   })
 
   it('walks the subtree and preloads child backgrounds', async () => {
@@ -105,8 +152,8 @@ describe('preCache – extra coverage', () => {
 
     await preCache(root)
 
-    // Comprobamos que el hijo fue visto y cacheado
-    const key = safeEncodeURI(CHILD_URL)
+    // Comprobamos que el hijo fue visto y cacheado (clave con prefijo de proxy vacío)
+    const key = '|' + safeEncodeURI(CHILD_URL)
     expect(cache.background.has(key)).toBe(true)
 
     document.body.removeChild(root)

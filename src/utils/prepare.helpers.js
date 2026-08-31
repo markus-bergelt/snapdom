@@ -4,8 +4,10 @@
  */
 
 /**
- * Stabilize layout by adding transparent border if element has outline but no border
+ * Stabilize layout by adding transparent border if element has outline but no border.
+ * Returns an undo function to restore the element's original inline border.
  * @param {Element} element
+ * @returns {() => void}
  */
 export function stabilizeLayout(element) {
   const style = getComputedStyle(element)
@@ -18,6 +20,55 @@ export function stabilizeLayout(element) {
   const borderAbsent = (borderStyle === 'none' || parseFloat(borderWidth) === 0)
 
   if (outlineVisible && borderAbsent) {
+    const original = element.style.border
     element.style.border = `${outlineWidth} solid transparent`
+    return () => { element.style.border = original }
+  }
+  return () => {}
+}
+
+/**
+ * #281: Force content-visibility to 'visible' on all descendants that use 'auto'.
+ * Safari (and some Chromium) skip rendering/style computation for content-visibility:auto
+ * elements outside the viewport, causing blank captures.
+ *
+ * Only 'auto' is forced. 'hidden' is an explicit authoring decision, not an optimization:
+ * the browser paints the element's own box (background, border, padding) and skips its
+ * contents outright — a descendant's `visibility: visible` does not bring them back.
+ * Forcing it to 'visible' used to un-hide the whole subtree, which is why the
+ * "content-visibility:hidden ⇒ visibility:hidden" guard in modules/styles.js could never
+ * fire: this pass had already erased the value it looked for.
+ * Returns an undo function to restore original values.
+ * @param {Element} root
+ * @returns {() => void}
+ */
+export function forceContentVisibility(root) {
+  const saved = []
+  try {
+    const all = root.querySelectorAll('*')
+    for (const el of all) {
+      if (!(el instanceof HTMLElement)) continue
+      const cv = el.style.contentVisibility || ''
+      const cs = getComputedStyle(el)
+      const computed = cs.contentVisibility || cs.getPropertyValue('content-visibility') || ''
+      if (computed === 'auto') {
+        saved.push({ el, original: cv })
+        el.style.contentVisibility = 'visible'
+      }
+    }
+    // Check root itself
+    if (root instanceof HTMLElement) {
+      const cs = getComputedStyle(root)
+      const computed = cs.contentVisibility || cs.getPropertyValue('content-visibility') || ''
+      if (computed === 'auto') {
+        saved.push({ el: root, original: root.style.contentVisibility || '' })
+        root.style.contentVisibility = 'visible'
+      }
+    }
+  } catch { /* non-blocking */ }
+  return () => {
+    for (const { el, original } of saved) {
+      try { el.style.contentVisibility = original } catch {}
+    }
   }
 }

@@ -3,6 +3,32 @@
 /** Props donde típicamente aparece var() y conviene “materializar” si difieren del baseline */
 const KEY_PROPS = ['fill', 'stroke', 'color', 'background-color', 'stop-color']
 
+/** SVG container elements that act as templates: their descendants are rendered
+ *  virtually via <use> / url(#...). CSS custom properties on the use site cascade
+ *  into the rendered shadow tree, so any var() inside these containers must be
+ *  preserved (NOT materialized at clone time) — otherwise we'd freeze the var()
+ *  to whatever it resolves to in the dead template context (usually the fallback). */
+const SVG_TEMPLATE_TAGS = new Set([
+  'symbol', 'defs', 'pattern', 'marker',
+  'linearGradient', 'radialGradient', 'filter'
+])
+export function isInSvgTemplate(el) {
+  let p = el
+  while (p && p.nodeType === 1) {
+    if (p.namespaceURI === 'http://www.w3.org/2000/svg') {
+      // #459: mask/clipPath paint their content in place, exactly once, at their own
+      // document position — unlike <use>, there's no per-consumer shadow tree to
+      // re-scope var() against, so this IS the one true rendering context. Treating
+      // them as templates skipped inlineAllStyles entirely, dropping font-family/etc.
+      // for anything inside (e.g. a <text> used as a mask cutout).
+      if (p.localName === 'mask' || p.localName === 'clipPath') return false
+      if (SVG_TEMPLATE_TAGS.has(p.localName)) return true
+    }
+    p = p.parentNode
+  }
+  return false
+}
+
 /** Cache de estilos base por (namespaceURI + tagName) */
 const __BASELINE_CACHE = new Map()
 
@@ -21,6 +47,7 @@ function getBaselineComputed(tagName, ns) {
   // Lo insertamos de forma que el UA pueda computar estilos, pero sin afectar layout
   // (un shadowRoot vacío temporal funciona bien)
   const holder = doc.createElement('div')
+  holder.setAttribute('data-snapdom-internal', '')
   holder.style.cssText = 'position:absolute;left:-99999px;top:-99999px;contain:strict;display:block;'
   holder.appendChild(el)
   doc.documentElement.appendChild(holder)
@@ -41,7 +68,11 @@ function getBaselineComputed(tagName, ns) {
  * pero el valor computado de KEY_PROPS difiere del baseline, inlina ese valor.
  */
 export function resolveCSSVars(sourceEl, cloneEl) {
-  if (!(sourceEl instanceof Element) || !(cloneEl instanceof Element)) return
+  if ((sourceEl?.nodeType !== 1) || (cloneEl?.nodeType !== 1)) return
+
+  // #408: descendants of <symbol>/<defs>/<pattern>/etc. render through <use>/url(#…),
+  // where the cascade lives. Materializing var() here freezes the fallback.
+  if (isInSvgTemplate(sourceEl)) return
 
   // --- 0) Pre-chequeo ultra barato
   const styleAttr = sourceEl.getAttribute?.('style')
@@ -65,8 +96,14 @@ export function resolveCSSVars(sourceEl, cloneEl) {
   if (hasVar) {
     const author = sourceEl.style
     if (author && author.length) {
+      // visitedProps guards against duplicate property names in the iteration
+      // (can happen with browser quirks or malformed style attributes) which
+      // would otherwise re-resolve and re-set the same property redundantly.
+      const visitedProps = new Set()
       for (let i = 0; i < author.length; i++) {
         const prop = author[i]
+        if (visitedProps.has(prop)) continue
+        visitedProps.add(prop)
         const val = author.getPropertyValue(prop)
         if (!val || !val.includes('var(')) continue
         const resolved = cs && cs.getPropertyValue(prop)

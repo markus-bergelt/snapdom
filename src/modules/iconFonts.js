@@ -1,4 +1,5 @@
 // iconFonts.js
+import { cache } from '../core/cache.js'
 
 // ---------------------------------------------------------------------------
 // Detection / configuration (kept as-is + extensible)
@@ -26,13 +27,26 @@ export const ICON_FONT_URLS = Object.assign({
 }, (typeof window !== 'undefined' && window.__SNAPDOM_ICON_FONTS__) || {})
 
 let userIconFonts = []
+const userIconFontKeys = new Set()
 
+function escapeRegExp(string) {
+  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') // $& means the whole matched string
+}
+
+// Callers (e.g. snapdom.js) re-invoke this on every capture with the same
+// `iconFonts` option, so dedup against the module-level list instead of
+// growing it unboundedly across repeated captures (animations, session()).
 export function extendIconFonts(fonts) {
   const list = Array.isArray(fonts) ? fonts : [fonts]
   for (const f of list) {
-    if (f instanceof RegExp) userIconFonts.push(f)
-    else if (typeof f === 'string') userIconFonts.push(new RegExp(f, 'i'))
-    else console.warn('[snapdom] Ignored invalid iconFont value:', f)
+    let rx
+    if (f instanceof RegExp) rx = f
+    else if (typeof f === 'string') rx = new RegExp(escapeRegExp(f), 'i')
+    else { console.warn('[snapdom] Ignored invalid iconFont value:', f); continue }
+    const key = `${rx.source}/${rx.flags}`
+    if (userIconFontKeys.has(key)) continue
+    userIconFontKeys.add(key)
+    userIconFonts.push(rx)
   }
 }
 
@@ -176,6 +190,7 @@ export async function materialIconToImage(
 
   // Measure with same family used on canvas
   const span = document.createElement('span')
+  span.setAttribute('data-snapdom-internal', '')
   span.textContent = ligatureText
   span.style.position = 'absolute'
   span.style.visibility = 'hidden'
@@ -220,26 +235,38 @@ export async function materialIconToImage(
  * Replace Material ligature nodes in the CLONE by <img>.
  * Reads styles from SOURCE for accurate size/color/variation/class.
  */
-export async function ligatureIconToImage(cloneRoot, sourceRoot) {
-  if (!(cloneRoot instanceof Element)) return 0
+export async function ligatureIconToImage(cloneRoot, sourceRoot, nodeMap = cache.session.nodeMap) {
+  if ((cloneRoot?.nodeType !== 1)) return 0
 
   const selector = '.material-icons, [class*="material-symbols"]'
 
+  // querySelectorAll never matches the element it's called on — a capture root that IS the
+  // icon (e.g. snapdom(iconSpan) for a single toolbar icon) was silently skipped, leaving its
+  // ligature text unconverted (see #461 for the same shape in images.js).
   const cloneNodes = Array.from(
     cloneRoot.querySelectorAll(selector)
   ).filter(n => n && n.textContent && n.textContent.trim())
+  if (cloneRoot.matches?.(selector) && cloneRoot.textContent && cloneRoot.textContent.trim()) {
+    cloneNodes.unshift(cloneRoot)
+  }
 
   if (cloneNodes.length === 0) return 0
 
-  const sourceNodes = (sourceRoot instanceof Element)
+  // Map each clone node to its exact source via the clone→source nodeMap built by deepClone.
+  // Pairing the two trees positionally breaks when excludeMode:'remove' drops nodes from the
+  // clone but not the source: indices shift and we read the wrong source's color/size/variation.
+  const sourceNodes = (sourceRoot?.nodeType === 1)
     ? Array.from(sourceRoot.querySelectorAll(selector)).filter(n => n && n.textContent && n.textContent.trim())
     : []
+  if (sourceRoot?.nodeType === 1 && sourceRoot.matches?.(selector) && sourceRoot.textContent && sourceRoot.textContent.trim()) {
+    sourceNodes.unshift(sourceRoot)
+  }
 
   let replaced = 0
 
   for (let i = 0; i < cloneNodes.length; i++) {
     const el = cloneNodes[i]
-    const src = sourceNodes[i] || null
+    const src = (nodeMap && nodeMap.get(el)) || sourceNodes[i] || null
 
     try {
       const cs = src ? getComputedStyle(src) : getComputedStyle(el)

@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { inlineSingleBackgroundEntry } from '../src/utils/image.js'
 import { snapFetch } from '../src/modules/snapFetch.js'
+import { safeEncodeURI, resolveURL } from '../src/utils/helpers.js'
 import { cache } from '../src/core/cache.js'
 
 // Silence our intentional rejections so Vitest doesn't flag them as unhandled
@@ -66,9 +67,32 @@ describe('inlineSingleBackgroundEntry', () => {
   it('returns cached data URL when present in cache.background', async () => {
     const url = 'https://example.com/img.png'
     const data = 'data:image/png;base64,AAA'
-    cache.background.set(url, data)
+    // Cache key is `<proxy>|<url>` (no proxy here → empty prefix).
+    cache.background.set(`|${url}`, data)
     const out = await inlineSingleBackgroundEntry(`url("${url}")`)
     expect(out).toBe(`url("${data}")`)
+  })
+
+  it('a no-proxy failure does not poison a later capture using a proxy (#8)', async () => {
+    const url = 'https://cors.example.com/img.png'
+    const encoded = safeEncodeURI(resolveURL(url))
+
+    // No-proxy attempt previously failed → null remembered under the no-proxy key.
+    cache.background.set(`|${encoded}`, null)
+
+    // The no-proxy path still short-circuits to 'none' from its own cached failure.
+    expect(await inlineSingleBackgroundEntry(`url("${url}")`)).toBe('none')
+
+    // A capture WITH a working proxy uses a distinct key, so it fetches fresh instead of
+    // inheriting the poisoned null — the recoverable image is not silently dropped.
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      blob: async () => new Blob([new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10])], { type: 'image/png' }),
+    }))
+    const out = await inlineSingleBackgroundEntry(`url("${url}")`, { useProxy: 'https://proxy/?u=' })
+    expect(out).not.toBe('none')
+    expect(out).toMatch(/^url\("data:image\/png/)
   })
 
   it('inlines via snapFetch on success (raster path → Image onload)', async () => {
@@ -104,6 +128,55 @@ describe('inlineSingleBackgroundEntry', () => {
 
     const out = await inlineSingleBackgroundEntry('url("https://bad.example.com/x.png")')
     expect(out).toBe('none')
+  })
+
+  // Bug-hunt finding: image-set()/-webkit-image-set() used to fall through to extractURL's
+  // generic regex, which always grabs whichever url() appears FIRST in the string — silently
+  // discarding resolution and inlining the 1x candidate even on a 2x display.
+  describe('image-set() resolution matching', () => {
+    let originalDpr
+    beforeEach(() => {
+      originalDpr = Object.getOwnPropertyDescriptor(window, 'devicePixelRatio')
+    })
+    afterEach(() => {
+      if (originalDpr) Object.defineProperty(window, 'devicePixelRatio', originalDpr)
+    })
+
+    it('picks the 2x candidate on a 2x display, not whichever url() comes first', async () => {
+      Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true })
+      const oneX = 'https://example.com/photo-1x.png'
+      const twoX = 'https://example.com/photo-2x.png'
+      cache.background.set(`|${oneX}`, 'data:image/png;base64,ONEX')
+      cache.background.set(`|${twoX}`, 'data:image/png;base64,TWOX')
+      const out = await inlineSingleBackgroundEntry(
+        `image-set(url("${oneX}") 1x, url("${twoX}") 2x)`
+      )
+      expect(out).toBe('url("data:image/png;base64,TWOX")')
+    })
+
+    it('picks the 1x candidate on a 1x display', async () => {
+      Object.defineProperty(window, 'devicePixelRatio', { value: 1, configurable: true })
+      const oneX = 'https://example.com/photo-1x-b.png'
+      const twoX = 'https://example.com/photo-2x-b.png'
+      cache.background.set(`|${oneX}`, 'data:image/png;base64,ONEXB')
+      cache.background.set(`|${twoX}`, 'data:image/png;base64,TWOXB')
+      const out = await inlineSingleBackgroundEntry(
+        `image-set(url("${oneX}") 1x, url("${twoX}") 2x)`
+      )
+      expect(out).toBe('url("data:image/png;base64,ONEXB")')
+    })
+
+    it('works with the -webkit- prefixed form', async () => {
+      Object.defineProperty(window, 'devicePixelRatio', { value: 2, configurable: true })
+      const oneX = 'https://example.com/wk-1x.png'
+      const twoX = 'https://example.com/wk-2x.png'
+      cache.background.set(`|${oneX}`, 'data:image/png;base64,WKONE')
+      cache.background.set(`|${twoX}`, 'data:image/png;base64,WKTWO')
+      const out = await inlineSingleBackgroundEntry(
+        `-webkit-image-set(url("${oneX}") 1x, url("${twoX}") 2x)`
+      )
+      expect(out).toBe('url("data:image/png;base64,WKTWO")')
+    })
   })
 })
 

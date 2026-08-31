@@ -1,4 +1,3 @@
-import { cache } from '../core/cache'
 
 /**
  * Lightweight CSS counter resolver for SnapDOM.
@@ -13,11 +12,6 @@ import { cache } from '../core/cache'
 /** Detects if a content string uses counter()/counters(). */
 export function hasCounters(input) {
   return /\bcounter\s*\(|\bcounters\s*\(/.test(input || '')
-}
-
-/** Replace every CSS string token "..." with its raw content (keeps single quotes). */
-export function unquoteDoubleStrings(s) {
-  return (s || '').replace(/"([^"]*)"/g, '$1')
 }
 
 /**
@@ -54,13 +48,16 @@ function roman(n, upper = true) {
  */
 function formatCounter(value, style) {
   switch ((style || 'decimal').toLowerCase()) {
-    case 'decimal': return String(Math.max(0, value))
-    case 'decimal-leading-zero': return (value < 10 ? '0' : '') + String(Math.max(0, value))
+    case 'decimal': return String(value)
+    case 'decimal-leading-zero': {
+      const abs = Math.abs(value)
+      return (value < 0 ? '-' : '') + (abs < 10 ? '0' : '') + String(abs)
+    }
     case 'lower-alpha': return alpha(value, false)
     case 'upper-alpha': return alpha(value, true)
     case 'lower-roman': return roman(value, false)
     case 'upper-roman': return roman(value, true)
-    default: return String(Math.max(0, value))
+    default: return String(value)
   }
 }
 
@@ -79,8 +76,6 @@ function formatCounter(value, style) {
  * @returns {{ get(node: Element, name: string): number, getStack(node: Element, name: string): number[] }}
  */
 export function buildCounterContext(root) {
-  const getEpoch = () => (cache?.session?.__counterEpoch ?? 0)
-   let run = getEpoch()
   const nodeCounters = new WeakMap()
   const rootEl = (root instanceof Document) ? root.documentElement : root
 
@@ -119,6 +114,22 @@ export function buildCounterContext(root) {
         } else {
           map.set(name, [val])         // replace any carried state
         }
+      }
+    }
+
+    // counter-set (sets top value without creating a new scope)
+    let set
+    try { set = el.style?.counterSet || getComputedStyle(el).counterSet } catch {}
+    if (set && set !== 'none') {
+      for (const part of set.split(',')) {
+        const toks = part.trim().split(/\s+/)
+        const name = toks[0]
+        const val = Number.isFinite(Number(toks[1])) ? Number(toks[1]) : 0
+        if (!name) continue
+        const stack = map.get(name) || []
+        if (stack.length === 0) stack.push(0)
+        stack[stack.length - 1] = val
+        map.set(name, stack)
       }
     }
 
@@ -173,22 +184,34 @@ export function buildCounterContext(root) {
       const childCarry = build(child, curr, nextCarry)
       nextCarry = childCarry
     }
-    return curr // for the next sibling of the parent
+
+    // Sibling carry: strip depth added by counter-reset on this element.
+    // counter-reset creates a scope local to this subtree; it must not leak
+    // to the next sibling. Truncate each counter back to the depth it had in
+    // the incoming carryMap, preserving increments but discarding new scopes.
+    const siblingCarry = new Map()
+    for (const [name, inStack] of carryMap) {
+      const depth = inStack.length
+      const finalStack = nextCarry.get(name)
+      siblingCarry.set(name, finalStack && finalStack.length
+        ? finalStack.slice(0, depth)
+        : inStack.slice())
+    }
+    // Counters created by increment (no prior existence, no reset) are
+    // implicitly root-level and should propagate to siblings at depth 1.
+    for (const [name, finalStack] of nextCarry) {
+      if (!siblingCarry.has(name) && finalStack.length && !parentMap.has(name)) {
+        siblingCarry.set(name, finalStack.slice(0, 1))
+      }
+    }
+    return siblingCarry
   }
 
   const empty = new Map()
   build(rootEl, empty, empty)
 
-    // Si cambió el epoch, reconstruimos el mapa antes de responder
-  function ensureFresh() {
-    const now = getEpoch()
-    if (now !== run) {
-      run = now
-      const empty = new Map()
-      build(rootEl, empty, empty)
-    }
-  }
-
+  // The context is per-capture (lazily built on sessionCache) and never outlives its
+  // capture, so no cross-capture invalidation is needed here.
   return {
     /**
      * Get top value for counter name at given node.
@@ -196,7 +219,6 @@ export function buildCounterContext(root) {
      * @param {string} name
      */
     get(node, name) {
-      ensureFresh()
       const s = nodeCounters.get(node)?.get(name)
       return s && s.length ? s[s.length - 1] : 0
     },
@@ -206,7 +228,6 @@ export function buildCounterContext(root) {
      * @param {string} name
      */
     getStack(node, name) {
-      ensureFresh()
       const s = nodeCounters.get(node)?.get(name)
       return s ? s.slice() : []
     }
@@ -215,7 +236,10 @@ export function buildCounterContext(root) {
 
 /**
  * Resolves counter()/counters() calls inside a content string for a specific node,
- * returning a plain string suitable for textContent. Also strips double-quote tokens.
+ * returning the content with counter() expanded but quoted-string tokens preserved.
+ * The caller (pseudo.js) is responsible for joining tokens and stripping quotes —
+ * keeping quotes here lets its tokenizer work so source whitespace between adjacent
+ * tokens (e.g. `counter(x) ")"`) doesn't leak into the rendered text.
  *
  * @param {string} raw
  * @param {Element} node
@@ -225,7 +249,7 @@ export function resolveCountersInContent(raw, node, ctx) {
   if (!raw || raw === 'none') return raw
   try {
     const RX = /\b(counter|counters)\s*\(([^)]+)\)/g
-    let out = raw.replace(RX, (_, fn, args) => {
+    return raw.replace(RX, (_, fn, args) => {
       const parts = String(args).split(',').map(s => s.trim())
       if (fn === 'counter') {
         const name = parts[0]?.replace(/^["']|["']$/g, '')
@@ -242,97 +266,7 @@ export function resolveCountersInContent(raw, node, ctx) {
         return pieces.join(sep)
       }
     })
-    return unquoteDoubleStrings(out)
   } catch {
     return '- '
   }
-}
-
-/**
- * Create a derived counter context that applies a pseudo's counter-reset /
- * counter-increment *for this node only*, before resolving content.
- * Works with ::before / ::after (and any pseudo with content).
- *
- * @param {Element} node
- * @param {CSSStyleDeclaration|null} pseudoStyle getComputedStyle(node, '::before' | '::after')
- * @param {{get(node: Element, name: string): number, getStack(node: Element, name: string): number[]}} baseCtx
- */
-export function deriveCounterCtxForPseudo(node, pseudoStyle, baseCtx) {
-  const modStacks = new Map()
-
-  /** Parse "a 1, b -2" -> [{name:'a', num:1}, {name:'b', num:-2}] */
-  function parseListDecl(value) {
-    const out = []
-    if (!value || value === 'none') return out
-    for (const part of String(value).split(',')) {
-      const toks = part.trim().split(/\s+/)
-      const name = toks[0]
-      const num = Number.isFinite(Number(toks[1])) ? Number(toks[1]) : undefined
-      if (name) out.push({ name, num })
-    }
-    return out
-  }
-
-  const resets = parseListDecl(pseudoStyle?.counterReset)
-  const incs   = parseListDecl(pseudoStyle?.counterIncrement)
-
-  function getStackDerived(name) {
-    if (modStacks.has(name)) return modStacks.get(name).slice()
-
-    // base stack at this node from the element context
-    let stack = baseCtx.getStack(node, name)
-    stack = stack.length ? stack.slice() : []
-
-    // counter-reset (push if exists, replace if not)
-    const r = resets.find(x => x.name === name)
-    if (r) {
-      const val = Number.isFinite(r.num) ? r.num : 0
-      if (stack.length) {
-        stack = stack.slice()
-        stack.push(val)
-      } else {
-        stack = [val]
-      }
-    }
-
-    // counter-increment (on top; create top=0 if missing)
-    const inc = incs.find(x => x.name === name)
-    if (inc) {
-      const by = Number.isFinite(inc.num) ? inc.num : 1
-      if (stack.length === 0) stack = [0]
-      stack[stack.length - 1] += by
-    }
-
-    modStacks.set(name, stack.slice())
-    return stack
-  }
-
-  return {
-    get(_node, name) {
-      const s = getStackDerived(name)
-      return s.length ? s[s.length - 1] : 0
-    },
-    getStack(_node, name) {
-      return getStackDerived(name)
-    }
-  }
-}
-
-/**
- * Convenience helper: resolve the final text to render for a pseudo's `content`,
- * correctly applying the pseudo's own counter-reset/increment before evaluation.
- *
- * @param {Element} node
- * @param {'::before'|'::after'} pseudo
- * @param {{get(node: Element, name: string): number, getStack(node: Element, name: string): number[]}} baseCtx
- * @returns {string} resolved content (without surrounding double quotes)
- */
-export function resolvePseudoContent(node, pseudo, baseCtx) {
-  let ps
-  try { ps = getComputedStyle(node, pseudo) } catch {}
-  const raw = ps?.content
-  if (!raw || raw === 'none' || raw === 'normal') return ''
-  const derived = deriveCounterCtxForPseudo(node, ps, baseCtx)
-  let out = resolveCountersInContent(raw, node, derived)
-  return unquoteDoubleStrings(out)
 }

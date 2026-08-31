@@ -11,7 +11,7 @@
  * @param {Document|ParentNode} [lookupRoot] - Where to search for external defs/symbols (defaults to element.ownerDocument).
  */
 export function inlineExternalDefsAndSymbols(element, lookupRoot) {
-  if (!element || !(element instanceof Element)) return
+  if (!element || (element?.nodeType !== 1)) return
 
   const doc = element.ownerDocument || document
   const searchRoot = lookupRoot || doc
@@ -123,6 +123,11 @@ export function inlineExternalDefsAndSymbols(element, lookupRoot) {
       '*[fill^="url("], *[stroke^="url("],*[filter^="url("],' +
       '*[clip-path^="url("],*[mask^="url("],*[marker^="url("],' +
       '*[marker-start^="url("],*[marker-mid^="url("],*[marker-end^="url("]'
+
+    // querySelectorAll never matches rootSvg itself: url(#id) refs carried on the
+    // <svg> element's own attributes (fill/filter/mask/clip-path/style) count too.
+    addUrlIdsFromValue(rootSvg.getAttribute('style') || '')
+    for (const a of URL_ATTRS) addUrlIdsFromValue(rootSvg.getAttribute(a))
 
     const candidates = rootSvg.querySelectorAll(query)
     for (const el of candidates) {

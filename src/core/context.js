@@ -2,20 +2,7 @@
  * @typedef {"disabled"|"full"|"auto"|"soft"} CachePolicy
  */
 
-/**
- * Normalizes `options.cache` into a canonical policy.
- * Accepted strings: "disabled" | "full" | "auto" | "soft"
- * Default: "soft"
- * @param {unknown} v
- * @returns {CachePolicy}
- */
-export function normalizeCachePolicy(v) {
-  if (typeof v === 'string') {
-    const s = v.toLowerCase().trim()
-    if (s === 'disabled' || s === 'full' || s === 'auto' || s === 'soft') return /** @type {CachePolicy} */(s)
-  }
-  return 'soft'
-}
+import { normalizeCachePolicy } from './cache.js'
 
 /**
  * Creates a normalized capture context for SnapDOM.
@@ -32,6 +19,7 @@ export function normalizeCachePolicy(v) {
  * @param {string|string[]} [options.iconFonts]
  * @param {string[]} [options.localFonts]
  * @param {string[]|undefined} [options.excludeFonts]
+ * @param {string[]} [options.fontStylesheetDomains]      // extra domains to fetch cross-origin CSS from (#309)
  * @param {string|function} [options.fallbackURL]
  * @param {string}  [options.useProxy]
  * @param {number|null} [options.width]
@@ -45,6 +33,11 @@ export function normalizeCachePolicy(v) {
  * @param {unknown} [options.cache] // "disabled"|"full"|"auto"|"soft"
  * @param {boolean} [options.outerTransforms] // NEW
  * @param {boolean} [options.outerShadows]      // NEW
+ * @param {"viewport"|{x:number,y:number,width:number,height:number}|null} [options.clip] - Capture only a region: 'viewport' (what the user currently sees) or a page-coordinate rect. Offscreen subtrees are pruned before styling/inlining, so this is faster than a full capture.
+ * @param {RegExp|((prop: string) => boolean)} [options.excludeStyleProps] - Skip props when snapshotting (#348). e.g. /^--/ to exclude CSS vars
+ * @param {boolean} [options.resolvePicturePlaceholders] - Resolve &lt;picture&gt; placeholders / lazy data-src before clone (default true)
+ * @param {{ timeout?: number, concurrency?: number, resolveLazySrc?: boolean, silent?: boolean }} [options.pictureResolver] - Fine-tune built-in picture resolver
+ * @param {boolean} [options.compress] - Downsample inlined raster images to their visible resolution (display box × scale × dpr), preserving the source codec. On by default; pass `false` to embed images verbatim.
  * @returns {Object}
  */
 export function createContext(options = {}) {
@@ -75,6 +68,7 @@ export function createContext(options = {}) {
       : (options.iconFonts ? [options.iconFonts] : []),
     localFonts: Array.isArray(options.localFonts) ? options.localFonts : [],
     excludeFonts: options.excludeFonts ?? undefined,
+    fontStylesheetDomains: Array.isArray(options.fontStylesheetDomains) ? options.fontStylesheetDomains : [],
     fallbackURL: options.fallbackURL ?? undefined,
 
     /** @type {CachePolicy} */
@@ -97,6 +91,37 @@ export function createContext(options = {}) {
     // NEW flags (user-friendly)
     outerTransforms: options.outerTransforms ?? true,
     outerShadows: options.outerShadows ?? false,
+
+    // Layout reconciliation: measure the styled clone in-document and pin diverging boxes
+    // to their live size. Opt-in (adds one in-document layout of the clone).
+    reconcile: options.reconcile ?? false,
+
+    // Memoizes repeated captures of an unchanged element (scoped MutationObserver + cached
+    // result, see src/core/burst.js) — dashboard polling, video/gif frame loops. Opt-in: it
+    // costs a persistent observer per element, wasted on a one-shot capture. When this is
+    // NOT set, snapdom instead tracks capture frequency cheaply and suggests it once if the
+    // same element is captured repeatedly (see checkBurstAdvice in capture.js).
+    burst: options.burst ?? false,
+    // One-off with burst:true — force a fresh capture for changes automatic tracking can't
+    // see (canvas pixel draws, programmatic CSSOM edits). Ignored without burst:true.
+    invalidate: options.invalidate ?? false,
+
+    // Region capture: 'viewport' or {x,y,width,height} in page coordinates
+    clip: options.clip ?? null,
+
+    // Perceptual image downsampling. On by default (big speed win on image-heavy raster captures,
+    // ~free on the common case, fidelity-neutral). Pass `compress: false` to embed images verbatim.
+    compress: options.compress !== false,
+
+    // #348: exclude style props from snapshot (reduces cost when :root has thousands of CSS vars)
+    excludeStyleProps: options.excludeStyleProps ?? null,
+
+    // Built-in picture / lazy-src resolver (see src/modules/pictureResolver.js)
+    resolvePicturePlaceholders: options.resolvePicturePlaceholders !== false,
+    pictureResolver:
+      options.pictureResolver && typeof options.pictureResolver === 'object'
+        ? options.pictureResolver
+        : {},
 
     // Plugins (reservado)
     // plugins: normalizePlugins(...),

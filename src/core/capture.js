@@ -108,6 +108,7 @@ function checkBurstAdvice(element) {
  * @param {number} [options.embedFontWeightThreshold=300] - Minimum delta font weight to embed
  * @param {boolean} [options.fast=true] - Whether to skip idle delay for faster results
  * @param {number} [options.scale=1] - Output scale multiplier
+ * @param {number} [options.embedFontWeightThreshold=300] - Minimum delta font weight to embed
  * @param {string[]} [options.exclude] - CSS selectors for elements to exclude
  * @param {Function} [options.filter] - Custom filter function
  * @param {boolean} [options.outerTransforms=false] - Normalize root by removing translate/rotate (keep scale/skew)
@@ -276,6 +277,7 @@ export async function captureDOM(element, options) {
 				localFonts: state.options.localFonts,
 				useProxy: state.options.useProxy,
 				fontStylesheetDomains: state.options.fontStylesheetDomains,
+				embedFontWeightThreshold: state.options.embedFontWeightThreshold ?? 300,
 				doc: ownerDoc,
 			});
 		});

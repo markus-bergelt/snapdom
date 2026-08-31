@@ -129,6 +129,7 @@ export async function preCache(root = document, options = {}) {
 				localFonts: options.localFonts,
 				useProxy: options.useProxy ?? useProxy,
 				fontStylesheetDomains: options.fontStylesheetDomains,
+				embedFontWeightThreshold: options.embedFontWeightThreshold ?? 300,
 			});
 		} catch {}
 	}

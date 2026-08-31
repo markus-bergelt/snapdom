@@ -601,13 +601,13 @@ function buildFontsCacheKey(required, exclude, localFonts, useProxy, fontStylesh
  * @param {Object} ctx
  * @param {Map} ctx.requiredIndex
  * @param {Set<number>} ctx.usedCodepoints
- * @param {(fam:string,styleSpec:string,weightSpec:string,stretchSpec:string)=>boolean} ctx.faceMatchesRequired
+ * @param {(fam:string,styleSpec:string,weightSpec:string,stretchSpec:string,embedFontWeightThreshold:number)=>boolean} ctx.faceMatchesRequired
  * @param {(meta:any, ranges:any)=>boolean} ctx.simpleExcluder
  * @param {string} ctx.useProxy
  * @param {Set<string>} ctx.visitedSheets
  * @param {number} ctx.depth
  */
-async function collectFacesFromSheet(sheet, baseHref, emitFace, ctx) {
+async function collectFacesFromSheet(sheet, baseHref, emitFace, ctx, embedFontWeightThreshold) {
 	let rules;
 	try {
 		rules = sheet.cssRules || [];
@@ -639,7 +639,7 @@ async function collectFacesFromSheet(sheet, baseHref, emitFace, ctx) {
 			if (childHref) ctx.visitedSheets.add(childHref);
 
 			const nextCtx = { ...ctx, depth: (ctx.depth || 0) + 1 };
-			await collectFacesFromSheet(rule.styleSheet, childHref, emitFace, nextCtx);
+			await collectFacesFromSheet(rule.styleSheet, childHref, emitFace, nextCtx, embedFontWeightThreshold);
 			continue;
 		}
 
@@ -672,7 +672,7 @@ async function collectFacesFromSheet(sheet, baseHref, emitFace, ctx) {
 				(variationRaw ? `font-variation-settings:${variationRaw};` : "") +
 				(urange ? `unicode-range:${urange};` : "");
 
-			const strict = ctx.faceMatchesRequired(family, styleSpec, weightSpec, stretchSpec);
+			const strict = ctx.faceMatchesRequired(family, styleSpec, weightSpec, stretchSpec, embedFontWeightThreshold);
 			if (!strict && !ctx.requiredIndex.has(family.toLowerCase())) continue;
 			const ranges = parseUnicodeRange(urange);
 			if (!unicodeIntersects(ctx.usedCodepoints, ranges)) continue;
@@ -727,7 +727,16 @@ async function collectFacesFromSheet(sheet, baseHref, emitFace, ctx) {
  * @param {Document} [options.doc=document]                  // document to scan for @font-face sources (the element's ownerDocument for iframe support, #441)
  * @returns {Promise<string>} inlined @font-face CSS
  */
-export async function embedCustomFonts({ required, usedCodepoints, exclude = undefined, localFonts = [], useProxy = "", fontStylesheetDomains = [], doc = document } = {}) {
+export async function embedCustomFonts({
+	required,
+	usedCodepoints,
+	exclude = undefined,
+	localFonts = [],
+	useProxy = "",
+	fontStylesheetDomains = [],
+	doc = document,
+	embedFontWeightThreshold = 300,
+} = {}) {
 	// ---------- Normalize inputs ----------
 	if (!(required instanceof Set)) required = new Set();
 	if (!(usedCodepoints instanceof Set)) usedCodepoints = new Set();
@@ -762,7 +771,7 @@ export async function embedCustomFonts({ required, usedCodepoints, exclude = und
 	 * @param {string} weightSpec  font-weight desde @font-face (p.ej. "400" o "400 700")
 	 * @param {string} stretchSpec font-stretch desde @font-face (p.ej. "100%")
 	 */
-	function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec) {
+	function faceMatchesRequired(fam, styleSpec, weightSpec, stretchSpec, embedFontWeightThreshold = 300) {
 		const famKey = String(fam).toLowerCase();
 		if (!requiredIndex.has(famKey)) return false;
 
@@ -942,7 +951,7 @@ export async function embedCustomFonts({ required, usedCodepoints, exclude = und
 				const srcRaw = getFontFaceDeclaration(face, "src");
 				const srcUrls = extractSrcUrls(srcRaw, link.href);
 
-				const strict = faceMatchesRequired(family, styleSpec, weightSpec, stretchSpec);
+				const strict = faceMatchesRequired(family, styleSpec, weightSpec, stretchSpec, embedFontWeightThreshold);
 				if (!strict && !requiredIndex.has(family.toLowerCase())) continue;
 				const ranges = parseUnicodeRange(urange);
 				if (!unicodeIntersects(usedCodepoints, ranges)) continue;
@@ -993,6 +1002,7 @@ export async function embedCustomFonts({ required, usedCodepoints, exclude = und
 					finalCSS += faceCss;
 				},
 				ctx,
+				embedFontWeightThreshold,
 			);
 		} catch {
 			// cross-origin protected CSSOM; ignore (text pass already tried)
